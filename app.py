@@ -5,6 +5,11 @@ from lumaai import LumaAI
 from PIL import Image
 from io import BytesIO
 import base64
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Must be the first Streamlit command
 st.set_page_config(
@@ -14,7 +19,12 @@ st.set_page_config(
 )
 
 # Initialize Luma client
-client = LumaAI(auth_token=st.secrets["LUMA_API_KEY"])
+try:
+    client = LumaAI(auth_token=st.secrets["LUMA_API_KEY"])
+    logger.info("Successfully initialized Luma AI client")
+except Exception as e:
+    logger.error(f"Failed to initialize Luma AI client: {str(e)}")
+    st.error("שגיאה באתחול המערכת. אנא נסה שוב מאוחר יותר.")
 
 # CSS for RTL support
 st.markdown("""
@@ -63,10 +73,9 @@ st.markdown("""
         direction: ltr !important;
     }
     
-    /* File uploader */
-    .stUploadButton > div {
-        direction: rtl !important;
-        text-align: right !important;
+    /* File uploader - only keep LTR */
+    .stUploadedFile {
+        direction: ltr !important;
     }
     
     /* Tabs */
@@ -113,15 +122,21 @@ PROMPT_TEMPLATES = {
 
 def image_to_data_url(image):
     """Convert PIL image to base64 data URL"""
-    buffered = BytesIO()
-    image.save(buffered, format="JPEG")
-    img_str = base64.b64encode(buffered.getvalue()).decode()
-    return f"data:image/jpeg;base64,{img_str}"
+    try:
+        buffered = BytesIO()
+        image.save(buffered, format="JPEG")
+        img_str = base64.b64encode(buffered.getvalue()).decode()
+        return f"data:image/jpeg;base64,{img_str}"
+    except Exception as e:
+        logger.error(f"Failed to convert image to data URL: {str(e)}")
+        return None
 
 def generate_image(prompt, aspect_ratio="16:9", model="photon-1", style_ref=None, character_ref=None, modify_image=None):
     """Generate image using Luma AI"""
     try:
         with st.spinner("🎨 יוצר את התמונה שלך... (זה יכול לקחת כמה שניות)"):
+            logger.info(f"Starting image generation with prompt: {prompt[:50]}...")
+            
             params = {
                 "prompt": prompt,
                 "aspect_ratio": aspect_ratio,
@@ -130,25 +145,72 @@ def generate_image(prompt, aspect_ratio="16:9", model="photon-1", style_ref=None
             
             if style_ref:
                 params["style_ref"] = [{"url": style_ref, "weight": 0.8}]
+                logger.info("Adding style reference to generation")
             if character_ref:
                 params["character_ref"] = {"identity0": {"images": [character_ref]}}
+                logger.info("Adding character reference to generation")
             if modify_image:
                 params["modify_image_ref"] = {"url": modify_image, "weight": 1.0}
+                logger.info("Adding image modification reference to generation")
             
             generation = client.generations.image.create(**params)
+            logger.info(f"Generation started with ID: {generation.id}")
             
             while True:
                 generation = client.generations.get(id=generation.id)
                 if generation.state == "completed":
+                    logger.info("Generation completed successfully")
                     break
                 elif generation.state == "failed":
-                    raise RuntimeError(f"Generation failed: {generation.failure_reason}")
+                    error_msg = generation.failure_reason
+                    logger.error(f"Generation failed: {error_msg}")
+                    
+                    if "moderate" in error_msg.lower():
+                        raise RuntimeError("""
+                        התמונה לא עברה את בדיקת המודרציה. 
+                        אנא וודאו שהתמונה עומדת בהנחיות הבאות:
+                        - לא מכילה תוכן למבוגרים
+                        - לא מכילה אלימות
+                        - לא מכילה סמלים פוליטיים/דתיים שנויים במחלוקת
+                        - לא מכילה טקסט או לוגואים מוגנים
+                        """)
+                    else:
+                        raise RuntimeError(f"Generation failed: {error_msg}")
                 time.sleep(2)
             
             return generation.assets.image
     except Exception as e:
+        logger.error(f"Error during image generation: {str(e)}")
         st.error(f"אופס! משהו השתבש: {str(e)}")
         return None
+
+def display_uploaded_image(uploaded_file, caption=""):
+    """Display uploaded image with preview"""
+    try:
+        image = Image.open(uploaded_file)
+        # Create a thumbnail for preview
+        max_size = (300, 300)
+        image.thumbnail(max_size, Image.Resampling.LANCZOS)
+        with st.container():
+            col1, col2, col3 = st.columns([1,2,1])
+            with col2:
+                st.image(image, caption=caption, use_column_width=True)
+        return image
+    except Exception as e:
+        logger.error(f"Error displaying uploaded image: {str(e)}")
+        st.error("שגיאה בטעינת התמונה")
+        return None
+
+def display_upload_guidelines():
+    """Display guidelines for image upload"""
+    with st.expander("📋 הנחיות להעלאת תמונות"):
+        st.markdown("""
+        - התמונה צריכה להיות בפורמט PNG, JPG או JPEG
+        - התמונה צריכה להיות נקייה מתוכן למבוגרים או אלימות
+        - אין להעלות תמונות עם סמלים פוליטיים או דתיים שנויים במחלוקת
+        - אין להעלות תמונות עם טקסט או לוגואים מוגנים בזכויות יוצרים
+        - מומלץ להעלות תמונות באיכות טובה אך לא גדולות מדי
+        """)
 
 def main():
     st.markdown('<div class="rtl">', unsafe_allow_html=True)
@@ -189,10 +251,14 @@ def main():
                 selected_model = model.split(" ")[0]
                 image_url = generate_image(prompt, aspect_ratio, selected_model)
                 if image_url:
-                    response = requests.get(image_url)
-                    img = Image.open(BytesIO(response.content))
-                    st.image(img, caption="התמונה שנוצרה 🎨")
-                    st.markdown(f"**הפרומפט ששימש ליצירה:**\n```{prompt}```")
+                    try:
+                        response = requests.get(image_url)
+                        img = Image.open(BytesIO(response.content))
+                        st.image(img, caption="התמונה שנוצרה 🎨")
+                        st.markdown(f"**הפרומפט ששימש ליצירה:**\n```{prompt}```")
+                    except Exception as e:
+                        logger.error(f"Error displaying generated image: {str(e)}")
+                        st.error("שגיאה בטעינת התמונה שנוצרה")
             else:
                 st.warning("אנא הכנס פרומפט לפני היצירה!")
         st.markdown('</div>', unsafe_allow_html=True)
@@ -201,72 +267,87 @@ def main():
     with tabs[1]:
         st.markdown('<div class="rtl">', unsafe_allow_html=True)
         st.markdown("### העברת סגנון")
+        display_upload_guidelines()
         uploaded_style = st.file_uploader("העלה תמונת סגנון", type=["png", "jpg", "jpeg"], key="style")
-        prompt = st.text_area("תאר את התמונה שאנגלית:", 
+        
+        if uploaded_style:
+            st.markdown("##### תצוגה מקדימה של תמונת הסגנון:")
+            style_image = display_uploaded_image(uploaded_style)
+            
+        prompt = st.text_area("תאר את התמונה באנגלית:", 
                             placeholder="Example: A vibrant cityscape of Tel Aviv in the style of the reference image, detailed architecture, 8k quality", 
                             key="style_prompt")
         
         if uploaded_style and prompt and st.button("✨ צור בסגנון"):
-            style_image = Image.open(uploaded_style)
-            style_url = image_to_data_url(style_image)
-            
-            image_url = generate_image(prompt, style_ref=style_url)
-            if image_url:
-                response = requests.get(image_url)
-                img = Image.open(BytesIO(response.content))
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.image(style_image, caption="תמונת הסגנון המקורית")
-                with col2:
-                    st.image(img, caption="התמונה החדשה בסגנון שבחרת")
+            if style_image:
+                style_url = image_to_data_url(style_image)
+                image_url = generate_image(prompt, style_ref=style_url)
+                if image_url:
+                    try:
+                        response = requests.get(image_url)
+                        img = Image.open(BytesIO(response.content))
+                        st.image(img, caption="התמונה החדשה בסגנון שבחרת")
+                    except Exception as e:
+                        logger.error(f"Error displaying style transfer result: {str(e)}")
+                        st.error("שגיאה בטעינת התמונה שנוצרה")
         st.markdown('</div>', unsafe_allow_html=True)
 
     # Character Creation Tab
     with tabs[2]:
         st.markdown('<div class="rtl">', unsafe_allow_html=True)
         st.markdown("### יצירת דמויות")
+        display_upload_guidelines()
         uploaded_char = st.file_uploader("העלה תמונת דמות", type=["png", "jpg", "jpeg"], key="char")
+        
+        if uploaded_char:
+            st.markdown("##### תצוגה מקדימה של תמונת הדמות:")
+            char_image = display_uploaded_image(uploaded_char)
+            
         prompt = st.text_area("תאר את הסיטואציה החדשה באנגלית:", 
                             placeholder="Example: The character as a samurai warrior in a traditional Japanese garden, dramatic pose, detailed armor, 8k quality", 
                             key="char_prompt")
         
         if uploaded_char and prompt and st.button("✨ צור וריאציה"):
-            char_image = Image.open(uploaded_char)
-            char_url = image_to_data_url(char_image)
-            
-            image_url = generate_image(prompt, character_ref=char_url)
-            if image_url:
-                response = requests.get(image_url)
-                img = Image.open(BytesIO(response.content))
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.image(char_image, caption="תמונת הדמות המקורית")
-                with col2:
-                    st.image(img, caption="הדמות בסיטואציה החדשה")
+            if char_image:
+                char_url = image_to_data_url(char_image)
+                image_url = generate_image(prompt, character_ref=char_url)
+                if image_url:
+                    try:
+                        response = requests.get(image_url)
+                        img = Image.open(BytesIO(response.content))
+                        st.image(img, caption="הדמות בסיטואציה החדשה")
+                    except Exception as e:
+                        logger.error(f"Error displaying character variation: {str(e)}")
+                        st.error("שגיאה בטעינת התמונה שנוצרה")
         st.markdown('</div>', unsafe_allow_html=True)
 
     # Image Editing Tab
     with tabs[3]:
         st.markdown('<div class="rtl">', unsafe_allow_html=True)
         st.markdown("### עריכת תמונה קיימת")
+        display_upload_guidelines()
         uploaded_edit = st.file_uploader("העלה תמונה לעריכה", type=["png", "jpg", "jpeg"], key="edit")
+        
+        if uploaded_edit:
+            st.markdown("##### תצוגה מקדימה של התמונה לעריכה:")
+            edit_image = display_uploaded_image(uploaded_edit)
+            
         prompt = st.text_area("תאר את השינויים הרצויים באנגלית:", 
                             placeholder="Example: Change all flowers to pink and add magical sparkles around them, maintain original composition, 8k quality", 
                             key="edit_prompt")
         
         if uploaded_edit and prompt and st.button("✨ ערוך תמונה"):
-            edit_image = Image.open(uploaded_edit)
-            edit_url = image_to_data_url(edit_image)
-            
-            image_url = generate_image(prompt, modify_image=edit_url)
-            if image_url:
-                response = requests.get(image_url)
-                img = Image.open(BytesIO(response.content))
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.image(edit_image, caption="התמונה המקורית")
-                with col2:
-                    st.image(img, caption="התמונה לאחר העריכה")
+            if edit_image:
+                edit_url = image_to_data_url(edit_image)
+                image_url = generate_image(prompt, modify_image=edit_url)
+                if image_url:
+                    try:
+                        response = requests.get(image_url)
+                        img = Image.open(BytesIO(response.content))
+                        st.image(img, caption="התמונה לאחר העריכה")
+                    except Exception as e:
+                        logger.error(f"Error displaying edited image: {str(e)}")
+                        st.error("שגיאה בטעינת התמונה שנוצרה")
         st.markdown('</div>', unsafe_allow_html=True)
     
     st.markdown('</div>', unsafe_allow_html=True)
