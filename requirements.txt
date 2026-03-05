@@ -1,4 +1,2 @@
 streamlit==1.29.0
-lumaai
-requests==2.31.0
-pillow==10.1.0 
+pandas==2.2.2
