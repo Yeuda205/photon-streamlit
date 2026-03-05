@@ -1,356 +1,298 @@
+import json
+from dataclasses import asdict, dataclass
+from datetime import date, datetime
+from pathlib import Path
+from typing import Dict, List
+
+import pandas as pd
 import streamlit as st
-import time
-import requests
-from lumaai import LumaAI
-from PIL import Image
-from io import BytesIO
-import base64
-import logging
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-# Must be the first Streamlit command
 st.set_page_config(
-    page_title="מכונת החלומות של פוטון",
-    page_icon="✨",
-    layout="wide"
+    page_title="Filament Flow - ניהול פילמנטים",
+    page_icon="🧵",
+    layout="wide",
 )
 
-# Initialize Luma client
-try:
-    client = LumaAI(auth_token=st.secrets["LUMA_API_KEY"])
-    logger.info("Successfully initialized Luma AI client")
-except Exception as e:
-    logger.error(f"Failed to initialize Luma AI client: {str(e)}")
-    st.error("שגיאה באתחול המערכת. אנא נסה שוב מאוחר יותר.")
-
-# CSS for RTL support
-st.markdown("""
+st.markdown(
+    """
 <style>
-    /* Global RTL settings */
-    .main > div {
-        direction: rtl !important;
-    }
-    
-    .stMarkdown, .stText, div:not(.stSlider) > label {
-        direction: rtl !important;
-        text-align: right !important;
-    }
-    
-    /* Headers and text alignment */
-    h1, h2, h3, p {
-        direction: rtl !important;
-        text-align: right !important;
-    }
-    
-    /* Radio buttons and checkboxes */
-    .stRadio > div {
-        direction: rtl !important;
-        text-align: right !important;
-    }
-    
-    /* Selectbox */
-    .stSelectbox > div {
-        direction: rtl !important;
-        text-align: right !important;
-    }
-    
-    /* Text inputs and text areas */
-    .stTextInput > div, .stTextArea > div {
-        direction: rtl !important;
-        text-align: right !important;
-    }
-    
-    /* Buttons */
-    .stButton > button {
-        float: right !important;
-    }
-    
-    /* Keep sliders LTR */
-    .stSlider > div {
-        direction: ltr !important;
-    }
-    
-    /* File uploader - only keep LTR */
-    .stUploadedFile {
-        direction: ltr !important;
-    }
-    
-    /* Tabs */
-    .stTabs > div > div:first-child {
-        direction: rtl !important;
-    }
-    
-    /* Images and captions */
-    .stImage {
-        text-align: right !important;
-    }
-    
-    /* Error and warning messages */
-    .stAlert > div {
-        direction: rtl !important;
-        text-align: right !important;
-    }
+    .main > div {direction: rtl;}
+    .stMetric, h1, h2, h3, p, label {text-align: right !important;}
+    .stForm {border: 1px solid #e2e8f0; border-radius: 14px; padding: 12px;}
+    .status-ok {color: #047857; font-weight: 600;}
+    .status-low {color: #b45309; font-weight: 600;}
+    .status-critical {color: #b91c1c; font-weight: 700;}
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
-# Prompt templates with Hebrew descriptions and English prompts
-PROMPT_TEMPLATES = {
-    "🎸 רוק סטאר": {
-        "desc": "דובי רוק-סטאר על במה",
-        "prompt": "A cool teddy bear rock star playing electric guitar on a neon-lit stage, epic lighting, dynamic pose, detailed fur texture, 8k quality"
-    },
-    "🧙‍♂️ קוסם": {
-        "desc": "קוסם בספרייה עתיקה",
-        "prompt": "A wise wizard casting magical spells in an ancient mystical library, floating ancient books, magical sparkles, detailed robe textures, ethereal lighting, 8k quality"
-    },
-    "🚀 חלל": {
-        "desc": "חתול אסטרונאוט בחלל",
-        "prompt": "An astronaut cat floating in deep space, Earth in background, detailed spacesuit, cosmic nebula colors, zero gravity effects, cinematic lighting, 8k quality"
-    },
-    "🎨 אמן": {
-        "desc": "רובוט אמן בסטודיו",
-        "prompt": "A creative robot artist creating a masterpiece in a modern art studio, paint splatters, dynamic brushstrokes, artistic lighting, detailed mechanical parts, 8k quality"
-    },
-    "🌺 טבע": {
-        "desc": "גן פנטזיה קסום",
-        "prompt": "A magical fantasy garden with bioluminescent flowers and ethereal butterflies at sunset, mystical fog, fairy lights, detailed flora, dreamy atmosphere, 8k quality"
-    }
-}
+DATA_FILE = Path("data/filaments.json")
+LOW_STOCK_GRAMS = 250
+CRITICAL_STOCK_GRAMS = 100
 
-def image_to_data_url(image):
-    """Convert PIL image to base64 data URL"""
-    try:
-        buffered = BytesIO()
-        image.save(buffered, format="JPEG")
-        img_str = base64.b64encode(buffered.getvalue()).decode()
-        return f"data:image/jpeg;base64,{img_str}"
-    except Exception as e:
-        logger.error(f"Failed to convert image to data URL: {str(e)}")
-        return None
 
-def generate_image(prompt, aspect_ratio="16:9", model="photon-1", style_ref=None, character_ref=None, modify_image=None):
-    """Generate image using Luma AI"""
-    try:
-        with st.spinner("🎨 יוצר את התמונה שלך... (זה יכול לקחת כמה שניות)"):
-            logger.info(f"Starting image generation with prompt: {prompt[:50]}...")
-            
-            params = {
-                "prompt": prompt,
-                "aspect_ratio": aspect_ratio,
-                "model": model
-            }
-            
-            if style_ref:
-                params["style_ref"] = [{"url": style_ref, "weight": 0.8}]
-                logger.info("Adding style reference to generation")
-            if character_ref:
-                params["character_ref"] = {"identity0": {"images": [character_ref]}}
-                logger.info("Adding character reference to generation")
-            if modify_image:
-                params["modify_image_ref"] = {"url": modify_image, "weight": 1.0}
-                logger.info("Adding image modification reference to generation")
-            
-            generation = client.generations.image.create(**params)
-            logger.info(f"Generation started with ID: {generation.id}")
-            
-            while True:
-                generation = client.generations.get(id=generation.id)
-                if generation.state == "completed":
-                    logger.info("Generation completed successfully")
-                    break
-                elif generation.state == "failed":
-                    error_msg = generation.failure_reason
-                    logger.error(f"Generation failed: {error_msg}")
-                    
-                    if "moderate" in error_msg.lower():
-                        raise RuntimeError("""
-                        התמונה לא עברה את בדיקת המודרציה. 
-                        אנא וודאו שהתמונה עומדת בהנחיות הבאות:
-                        - לא מכילה תוכן למבוגרים
-                        - לא מכילה אלימות
-                        - לא מכילה סמלים פוליטיים/דתיים שנויים במחלוקת
-                        - לא מכילה טקסט או לוגואים מוגנים
-                        """)
-                    else:
-                        raise RuntimeError(f"Generation failed: {error_msg}")
-                time.sleep(2)
-            
-            return generation.assets.image
-    except Exception as e:
-        logger.error(f"Error during image generation: {str(e)}")
-        st.error(f"אופס! משהו השתבש: {str(e)}")
-        return None
+@dataclass
+class Filament:
+    id: str
+    name: str
+    material: str
+    color: str
+    brand: str
+    spool_weight_g: int
+    remaining_g: int
+    nozzle_temp_c: str
+    bed_temp_c: str
+    location: str
+    notes: str
+    updated_at: str
 
-def display_uploaded_image(uploaded_file, caption=""):
-    """Display uploaded image with preview"""
-    try:
-        image = Image.open(uploaded_file)
-        # Create a thumbnail for preview
-        max_size = (300, 300)
-        image.thumbnail(max_size, Image.Resampling.LANCZOS)
-        with st.container():
-            col1, col2, col3 = st.columns([1,2,1])
-            with col2:
-                st.image(image, caption=caption, use_column_width=True)
-        return image
-    except Exception as e:
-        logger.error(f"Error displaying uploaded image: {str(e)}")
-        st.error("שגיאה בטעינת התמונה")
-        return None
 
-def display_upload_guidelines():
-    """Display guidelines for image upload"""
-    with st.expander("📋 הנחיות להעלאת תמונות"):
-        st.markdown("""
-        - התמונה צריכה להיות בפורמט PNG, JPG או JPEG
-        - התמונה צריכה להיות נקייה מתוכן למבוגרים או אלימות
-        - אין להעלות תמונות עם סמלים פוליטיים או דתיים שנויים במחלוקת
-        - אין להעלות תמונות עם טקסט או לוגואים מוגנים בזכויות יוצרים
-        - מומלץ להעלות תמונות באיכות טובה אך לא גדולות מדי
-        """)
+@dataclass
+class UsageLog:
+    filament_id: str
+    project_name: str
+    grams_used: int
+    print_hours: float
+    created_at: str
 
-def main():
-    st.markdown('<div class="rtl">', unsafe_allow_html=True)
-    st.title("✨ מכונת החלומות של פוטון ✨")
-    st.markdown("### בואו ניצור קסם עם AI! 🪄")
-    
-    tabs = st.tabs(["🎨 יצירה בסיסית", "🖼️ סגנון מותאם", "👤 דמויות", "✏️ עריכת תמונה"])
-    
-    # Basic Generation Tab
-    with tabs[0]:
-        st.markdown('<div class="rtl">', unsafe_allow_html=True)
-        st.markdown("### יצירת תמונה חדשה")
-        prompt_type = st.radio(
-            "בחר סוג פרומפט:",
-            ["✍️ כתיבה חופשית", "📝 השראה מהדוגמאות"]
+
+def ensure_data_file() -> None:
+    DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if not DATA_FILE.exists():
+        DATA_FILE.write_text(
+            json.dumps({"filaments": [], "usage_logs": []}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
         )
-        
-        if prompt_type == "📝 השראה מהדוגמאות":
-            selected = st.selectbox("בחר פרומפט:", list(PROMPT_TEMPLATES.keys()))
-            st.markdown(f"**תיאור:** {PROMPT_TEMPLATES[selected]['desc']}")
-            prompt = PROMPT_TEMPLATES[selected]['prompt']
-        else:
-            prompt = st.text_area("תאר את התמונה באנגלית:", 
-                                placeholder="Example: A magical sunset over Tel Aviv skyline with floating lanterns and modern architecture, cinematic lighting, 8k quality")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            aspect_ratio = st.select_slider(
-                "יחס גובה-רוחב:",
-                options=["1:1", "3:4", "4:3", "9:16", "16:9", "9:21", "21:9"],
-                value="16:9"
+
+
+def load_data() -> Dict[str, List[Dict]]:
+    ensure_data_file()
+    return json.loads(DATA_FILE.read_text(encoding="utf-8"))
+
+
+def save_data(data: Dict[str, List[Dict]]) -> None:
+    DATA_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def status_label(remaining_g: int) -> str:
+    if remaining_g <= CRITICAL_STOCK_GRAMS:
+        return "🔴 קריטי"
+    if remaining_g <= LOW_STOCK_GRAMS:
+        return "🟠 נמוך"
+    return "🟢 תקין"
+
+
+def status_class(remaining_g: int) -> str:
+    if remaining_g <= CRITICAL_STOCK_GRAMS:
+        return "status-critical"
+    if remaining_g <= LOW_STOCK_GRAMS:
+        return "status-low"
+    return "status-ok"
+
+
+def filaments_df(data: Dict[str, List[Dict]]) -> pd.DataFrame:
+    rows = []
+    for filament in data["filaments"]:
+        used_percent = 100 - (filament["remaining_g"] / filament["spool_weight_g"] * 100)
+        rows.append(
+            {
+                "מזהה": filament["id"],
+                "שם": filament["name"],
+                "חומר": filament["material"],
+                "צבע": filament["color"],
+                "מותג": filament["brand"],
+                "נשאר (גרם)": filament["remaining_g"],
+                "משקל סליל (גרם)": filament["spool_weight_g"],
+                "% שימוש": round(used_percent, 1),
+                "סטטוס": status_label(filament["remaining_g"]),
+                "מיקום": filament["location"],
+                "עודכן": filament["updated_at"],
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def usage_df(data: Dict[str, List[Dict]]) -> pd.DataFrame:
+    name_map = {f["id"]: f["name"] for f in data["filaments"]}
+    rows = []
+    for log in data["usage_logs"]:
+        rows.append(
+            {
+                "תאריך": log["created_at"],
+                "פרויקט": log["project_name"],
+                "פילמנט": name_map.get(log["filament_id"], log["filament_id"]),
+                "צריכה (גרם)": log["grams_used"],
+                "שעות הדפסה": log["print_hours"],
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def add_filament(data: Dict[str, List[Dict]], filament: Filament) -> None:
+    data["filaments"].append(asdict(filament))
+    save_data(data)
+
+
+def log_usage(data: Dict[str, List[Dict]], usage: UsageLog) -> None:
+    target = next((f for f in data["filaments"] if f["id"] == usage.filament_id), None)
+    if not target:
+        raise ValueError("פילמנט לא נמצא")
+    if usage.grams_used > target["remaining_g"]:
+        raise ValueError("אין מספיק פילמנט לרישום הצריכה הזו")
+    target["remaining_g"] -= usage.grams_used
+    target["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    data["usage_logs"].append(asdict(usage))
+    save_data(data)
+
+
+def dashboard(data: Dict[str, List[Dict]]) -> None:
+    st.subheader("סקירה מהירה")
+    total_spools = len(data["filaments"])
+    total_remaining = sum(f["remaining_g"] for f in data["filaments"])
+    low_stock = [f for f in data["filaments"] if f["remaining_g"] <= LOW_STOCK_GRAMS]
+    usage_today = sum(
+        log["grams_used"]
+        for log in data["usage_logs"]
+        if log["created_at"].startswith(date.today().isoformat())
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("סלילים במלאי", total_spools)
+    c2.metric("סה״כ פילמנט זמין", f"{total_remaining:,} גרם")
+    c3.metric("מלאי נמוך/קריטי", len(low_stock))
+    c4.metric("צריכה היום", f"{usage_today} גרם")
+
+    if low_stock:
+        st.warning("⚠️ יש לך פילמנטים שדורשים חידוש מלאי")
+        for item in low_stock:
+            css = status_class(item["remaining_g"])
+            st.markdown(
+                f"<div class='{css}'>• {item['name']} ({item['material']} {item['color']}) - נשאר {item['remaining_g']} גרם</div>",
+                unsafe_allow_html=True,
             )
-        with col2:
-            model = st.radio("בחר מודל:", ["photon-1 (איכותי)", "photon-flash-1 (מהיר)"])
-        
-        if st.button("✨ צור תמונה"):
-            if prompt:
-                selected_model = model.split(" ")[0]
-                image_url = generate_image(prompt, aspect_ratio, selected_model)
-                if image_url:
-                    try:
-                        response = requests.get(image_url)
-                        img = Image.open(BytesIO(response.content))
-                        st.image(img, caption="התמונה שנוצרה 🎨")
-                        st.markdown(f"**הפרומפט ששימש ליצירה:**\n```{prompt}```")
-                    except Exception as e:
-                        logger.error(f"Error displaying generated image: {str(e)}")
-                        st.error("שגיאה בטעינת התמונה שנוצרה")
-            else:
-                st.warning("אנא הכנס פרומפט לפני היצירה!")
-        st.markdown('</div>', unsafe_allow_html=True)
 
-    # Style Transfer Tab
+
+def main() -> None:
+    st.title("🧵 Filament Flow")
+    st.caption("מערכת נוחה וקלה לניהול מלאי פילמנטים עם חוויית משתמש נקייה וברורה")
+
+    data = load_data()
+
+    tabs = st.tabs(["📊 דשבורד", "➕ הוספת סליל", "🛠️ רישום שימוש", "📦 ניהול מלאי", "📈 אנליטיקה"])
+
+    with tabs[0]:
+        dashboard(data)
+
     with tabs[1]:
-        st.markdown('<div class="rtl">', unsafe_allow_html=True)
-        st.markdown("### העברת סגנון")
-        display_upload_guidelines()
-        uploaded_style = st.file_uploader("העלה תמונת סגנון", type=["png", "jpg", "jpeg"], key="style")
-        
-        if uploaded_style:
-            st.markdown("##### תצוגה מקדימה של תמונת הסגנון:")
-            style_image = display_uploaded_image(uploaded_style)
-            
-        prompt = st.text_area("תאר את התמונה באנגלית:", 
-                            placeholder="Example: A vibrant cityscape of Tel Aviv in the style of the reference image, detailed architecture, 8k quality", 
-                            key="style_prompt")
-        
-        if uploaded_style and prompt and st.button("✨ צור בסגנון"):
-            if style_image:
-                style_url = image_to_data_url(style_image)
-                image_url = generate_image(prompt, style_ref=style_url)
-                if image_url:
-                    try:
-                        response = requests.get(image_url)
-                        img = Image.open(BytesIO(response.content))
-                        st.image(img, caption="התמונה החדשה בסגנון שבחרת")
-                    except Exception as e:
-                        logger.error(f"Error displaying style transfer result: {str(e)}")
-                        st.error("שגיאה בטעינת התמונה שנוצרה")
-        st.markdown('</div>', unsafe_allow_html=True)
+        st.subheader("הוספת פילמנט חדש")
+        with st.form("add_filament_form", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                name = st.text_input("שם מזהה לסליל", placeholder="לדוגמה: PLA לבן - מדפסת ראשית")
+                material = st.selectbox("חומר", ["PLA", "PETG", "ABS", "TPU", "ASA", "Nylon", "אחר"])
+                color = st.text_input("צבע", placeholder="לבן")
+                brand = st.text_input("מותג", placeholder="eSUN / Prusament / Sunlu")
+                spool_weight_g = st.number_input("משקל סליל מלא (גרם)", min_value=250, max_value=5000, value=1000, step=50)
+            with c2:
+                remaining_g = st.number_input("כמות נוכחית (גרם)", min_value=0, max_value=5000, value=1000, step=10)
+                nozzle_temp = st.text_input("טמפרטורת נחיר מומלצת", placeholder="200-220°C")
+                bed_temp = st.text_input("טמפרטורת מיטה מומלצת", placeholder="55-65°C")
+                location = st.text_input("מיקום אחסון", placeholder="ארון A - קופסה 2")
+                notes = st.text_area("הערות", placeholder="רגיש ללחות, מומלץ לייבש לפני הדפסות ארוכות")
 
-    # Character Creation Tab
+            submitted = st.form_submit_button("שמור פילמנט")
+
+        if submitted:
+            if not name.strip():
+                st.error("צריך להזין שם לסליל")
+            elif remaining_g > spool_weight_g:
+                st.error("הכמות הנוכחית לא יכולה להיות גדולה ממשקל הסליל")
+            else:
+                filament = Filament(
+                    id=f"F-{int(datetime.now().timestamp())}",
+                    name=name.strip(),
+                    material=material,
+                    color=color.strip() or "לא צוין",
+                    brand=brand.strip() or "לא צוין",
+                    spool_weight_g=int(spool_weight_g),
+                    remaining_g=int(remaining_g),
+                    nozzle_temp_c=nozzle_temp.strip() or "לא צוין",
+                    bed_temp_c=bed_temp.strip() or "לא צוין",
+                    location=location.strip() or "לא צוין",
+                    notes=notes.strip(),
+                    updated_at=datetime.now().strftime("%Y-%m-%d %H:%M"),
+                )
+                add_filament(data, filament)
+                st.success("הפילמנט נוסף בהצלחה ✅")
+
     with tabs[2]:
-        st.markdown('<div class="rtl">', unsafe_allow_html=True)
-        st.markdown("### יצירת דמויות")
-        display_upload_guidelines()
-        uploaded_char = st.file_uploader("העלה תמונת דמות", type=["png", "jpg", "jpeg"], key="char")
-        
-        if uploaded_char:
-            st.markdown("##### תצוגה מקדימה של תמונת הדמות:")
-            char_image = display_uploaded_image(uploaded_char)
-            
-        prompt = st.text_area("תאר את הסיטואציה החדשה באנגלית:", 
-                            placeholder="Example: The character as a samurai warrior in a traditional Japanese garden, dramatic pose, detailed armor, 8k quality", 
-                            key="char_prompt")
-        
-        if uploaded_char and prompt and st.button("✨ צור וריאציה"):
-            if char_image:
-                char_url = image_to_data_url(char_image)
-                image_url = generate_image(prompt, character_ref=char_url)
-                if image_url:
-                    try:
-                        response = requests.get(image_url)
-                        img = Image.open(BytesIO(response.content))
-                        st.image(img, caption="הדמות בסיטואציה החדשה")
-                    except Exception as e:
-                        logger.error(f"Error displaying character variation: {str(e)}")
-                        st.error("שגיאה בטעינת התמונה שנוצרה")
-        st.markdown('</div>', unsafe_allow_html=True)
+        st.subheader("רישום צריכת חומר מהדפסה")
+        if not data["filaments"]:
+            st.info("אין עדיין פילמנטים במערכת. הוסיפו סליל קודם.")
+        else:
+            options = {
+                f"{f['name']} | נשאר: {f['remaining_g']} גרם": f["id"] for f in data["filaments"]
+            }
+            with st.form("usage_form", clear_on_submit=True):
+                selected_label = st.selectbox("בחר פילמנט", list(options.keys()))
+                project_name = st.text_input("שם פרויקט", placeholder="Bracket v2")
+                grams_used = st.number_input("כמה גרם השתמשת?", min_value=1, max_value=2000, value=30)
+                print_hours = st.number_input("משך הדפסה (שעות)", min_value=0.1, max_value=100.0, value=2.5, step=0.1)
+                usage_submitted = st.form_submit_button("רשום שימוש")
 
-    # Image Editing Tab
+            if usage_submitted:
+                try:
+                    usage = UsageLog(
+                        filament_id=options[selected_label],
+                        project_name=project_name.strip() or "פרויקט ללא שם",
+                        grams_used=int(grams_used),
+                        print_hours=float(print_hours),
+                        created_at=datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    )
+                    log_usage(data, usage)
+                    st.success("השימוש נשמר והמלאי עודכן ✅")
+                except ValueError as err:
+                    st.error(str(err))
+
     with tabs[3]:
-        st.markdown('<div class="rtl">', unsafe_allow_html=True)
-        st.markdown("### עריכת תמונה קיימת")
-        display_upload_guidelines()
-        uploaded_edit = st.file_uploader("העלה תמונה לעריכה", type=["png", "jpg", "jpeg"], key="edit")
-        
-        if uploaded_edit:
-            st.markdown("##### תצוגה מקדימה של התמונה לעריכה:")
-            edit_image = display_uploaded_image(uploaded_edit)
-            
-        prompt = st.text_area("תאר את השינויים הרצויים באנגלית:", 
-                            placeholder="Example: Change all flowers to pink and add magical sparkles around them, maintain original composition, 8k quality", 
-                            key="edit_prompt")
-        
-        if uploaded_edit and prompt and st.button("✨ ערוך תמונה"):
-            if edit_image:
-                edit_url = image_to_data_url(edit_image)
-                image_url = generate_image(prompt, modify_image=edit_url)
-                if image_url:
-                    try:
-                        response = requests.get(image_url)
-                        img = Image.open(BytesIO(response.content))
-                        st.image(img, caption="התמונה לאחר העריכה")
-                    except Exception as e:
-                        logger.error(f"Error displaying edited image: {str(e)}")
-                        st.error("שגיאה בטעינת התמונה שנוצרה")
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    st.markdown('</div>', unsafe_allow_html=True)
+        st.subheader("מבט מלאי")
+        df = filaments_df(data)
+        if df.empty:
+            st.info("עדיין אין נתוני מלאי")
+        else:
+            st.dataframe(df, use_container_width=True)
+
+            st.markdown("#### מחיקת סליל")
+            ids = {f"{f['name']} ({f['id']})": f["id"] for f in data["filaments"]}
+            selected = st.selectbox("בחר סליל למחיקה", list(ids.keys()))
+            if st.button("מחק סליל", type="secondary"):
+                data["filaments"] = [f for f in data["filaments"] if f["id"] != ids[selected]]
+                data["usage_logs"] = [u for u in data["usage_logs"] if u["filament_id"] != ids[selected]]
+                save_data(data)
+                st.success("הסליל והיסטוריית השימוש שלו נמחקו")
+
+    with tabs[4]:
+        st.subheader("אנליטיקה ותובנות")
+        usage = usage_df(data)
+        if usage.empty:
+            st.info("אין עדיין נתוני שימוש")
+        else:
+            st.dataframe(usage.sort_values("תאריך", ascending=False), use_container_width=True)
+
+            by_filament = (
+                usage.groupby("פילמנט", as_index=False)["צריכה (גרם)"]
+                .sum()
+                .sort_values("צריכה (גרם)", ascending=False)
+            )
+            st.bar_chart(by_filament, x="פילמנט", y="צריכה (גרם)")
+
+            total_usage = int(usage["צריכה (גרם)"].sum())
+            avg_hours = round(float(usage["שעות הדפסה"].mean()), 2)
+            st.markdown(f"**סה״כ חומר שנצרך:** {total_usage} גרם")
+            st.markdown(f"**ממוצע שעות להדפסה:** {avg_hours}")
+
 
 if __name__ == "__main__":
-    main() 
+    main()
